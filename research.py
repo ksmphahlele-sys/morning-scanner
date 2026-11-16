@@ -26,11 +26,20 @@ VARIANTS = [
     ("D. Longs, 3 ATR trailing stop", "pullback", "long", 2.0, None, 3.0, 60, False),
     ("E. Longs, trailing + rising 200 EMA", "pullback", "long", 2.0, None, 3.0, 60, True),
     ("F. 50-day breakout, trailing (classic trend)", "breakout", "long", 2.0, None, 3.0, 60, True),
+    ("Z1. CONTROL: random buys, F exits", "random", "long", 2.0, None, 3.0, 60, False),
+    ("Z2. CONTROL: random buys above rising 200 EMA, F exits", "random_trend", "long", 2.0, None, 3.0, 60, True),
 ]
+SEEDS = range(1, 11)  # controls are averaged over 10 random seeds
 
 
-def signals(df: pd.DataFrame, entry: str, sides: str, slope: bool) -> np.ndarray:
-    if entry == "pullback":
+def signals(df: pd.DataFrame, entry: str, sides: str, slope: bool, seed: int = 0) -> np.ndarray:
+    if entry.startswith("random"):
+        rng = np.random.default_rng(seed)
+        pick = rng.random(len(df)) < 0.05
+        if entry == "random_trend":
+            pick &= (df["Close"] > df["ema200"]).to_numpy()
+        sig = np.where(pick, "LONG", "")
+    elif entry == "pullback":
         sig = df["signal"].to_numpy().copy()
     else:
         hh = df["High"].rolling(50).max().shift(1)
@@ -109,11 +118,12 @@ def main():
     results = []
     for (vname, entry, sides, s_atr, t_atr, tr_atr, hold, slope) in VARIANTS:
         rows = []
-        for name, df in data.items():
-            for t in simulate(df, signals(df, entry, sides, slope), s_atr, t_atr, tr_atr, hold):
-                t["market"] = name
-                rows.append(t)
-        t = pd.DataFrame(rows)
+        for seed in (SEEDS if entry.startswith("random") else [0]):
+            for name, df in data.items():
+                for t in simulate(df, signals(df, entry, sides, slope, seed), s_atr, t_atr, tr_atr, hold):
+                    t["market"] = name
+                    rows.append(t)
+        t = pd.DataFrame(rows, columns=["date", "R", "market"])
         t["date"] = pd.to_datetime(t["date"], utc=True)
         is_t, oos_t = t[t.date < SPLIT], t[t.date >= SPLIT]
         results.append((vname, stats(is_t), stats(oos_t), oos_t))
@@ -125,14 +135,18 @@ def main():
     lines += ["", "## Out-of-sample: 2022–2026 (never used to choose)", "", head]
     lines += [f"| {v} | {cell(o)} |" for v, i, o, _ in results]
 
-    eligible = [r for r in results if r[1]["pf"] >= 1.2 and r[1]["n"] >= 50]
+    controls = [r for r in results if r[0].startswith("Z")]
+    bar = max(c[2]["avg"] for c in controls) + 0.05
+    eligible = [r for r in results if not r[0].startswith("Z") and r[1]["pf"] >= 1.2 and r[1]["n"] >= 50]
     if eligible:
         best = max(eligible, key=lambda r: r[1]["avg"])
         v, i, o, oos_t = best
-        passed = o["avg"] > 0 and o["pf"] >= 1.2
+        passed = o["avg"] > 0 and o["pf"] >= 1.2 and o["avg"] > bar
         verdict = "✅ PASSED" if passed else "❌ FAILED"
         lines += ["", "## Verdict", "", f"Chosen in-sample: **{v}**.",
-                  f"Out-of-sample: avg {o['avg']:+.2f}R, PF {o['pf']:.2f} over {o['n']} trades -> **{verdict}**."]
+                  f"Out-of-sample: avg {o['avg']:+.2f}R, PF {o['pf']:.2f} over {o['n']} trades -> **{verdict}**.",
+                  f"To pass it must also beat the best random control by 0.05R+ per trade (bar: {bar:+.2f}R). "
+                  "Control trade counts are pooled over 10 seeds."]
         if not oos_t.empty:
             lines += ["", "Out-of-sample by market:", "", "| Market | Trades | Avg | Total |", "|---|---:|---:|---:|"]
             for m, g in oos_t.groupby("market"):
