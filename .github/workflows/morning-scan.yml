@@ -4,7 +4,11 @@ on:
   schedule:
     # 05:00 UTC = 07:00 South Africa time, Monday to Friday
     - cron: "0 5 * * 1-5"
-  workflow_dispatch: {}   # lets you press "Run workflow" to test any time
+  workflow_dispatch: {}   # "Run workflow" button for manual tests
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   scan:
@@ -17,6 +21,4 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python scanner.py
         env:
-          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
-          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
