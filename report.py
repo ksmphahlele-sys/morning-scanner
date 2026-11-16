@@ -1,11 +1,9 @@
-"""Builds and sends the Morning Scan email."""
+"""Builds the Morning Scan report and posts it as a GitHub issue (GitHub emails it to you)."""
 
+import json
 import os
-import smtplib
-import ssl
-from datetime import datetime, timezone, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import urllib.request
+from datetime import datetime, timedelta, timezone
 
 SAST = timezone(timedelta(hours=2))
 
@@ -14,63 +12,53 @@ def fmt(x):
     return "-" if x is None else f"{x:,.2f}"
 
 
-def build_email(results: list, errors: list) -> tuple:
+def build_report(results: list, errors: list) -> tuple:
     signals = [r for r in results if r["signal"]]
     today = datetime.now(SAST).strftime("%a %d %b %Y")
-    subject = f"Morning Scan {today}: {len(signals)} setup(s)" if signals else f"Morning Scan {today}: no setups"
+    title = f"Morning Scan {today}: {len(signals)} setup(s)" if signals else f"Morning Scan {today}: no setups"
 
-    td = 'style="padding:6px 10px;border-bottom:1px solid #ddd;text-align:right"'
-    tdl = 'style="padding:6px 10px;border-bottom:1px solid #ddd;text-align:left"'
-    th = 'style="padding:6px 10px;background:#1f2937;color:#fff;text-align:right"'
-    thl = 'style="padding:6px 10px;background:#1f2937;color:#fff;text-align:left"'
-
-    html = [f"<h2 style='font-family:Arial'>Morning Scan - {today}</h2>"]
-
+    lines = []
     if signals:
-        html.append("<h3 style='font-family:Arial'>Setups today</h3>")
-        html.append(f"<table style='border-collapse:collapse;font-family:Arial;font-size:14px'><tr>"
-                    f"<th {thl}>Market</th><th {thl}>Signal</th><th {th}>Entry</th>"
-                    f"<th {th}>Stop</th><th {th}>Target (2R)</th></tr>")
+        lines += ["## Setups today", "",
+                  "| Market | Signal | Entry (approx.) | Stop | Target (2R) |",
+                  "|---|---|---:|---:|---:|"]
         for r in signals:
-            colour = "#059669" if r["signal"] == "LONG" else "#dc2626"
-            html.append(f"<tr><td {tdl}>{r['name']}</td>"
-                        f"<td {tdl}><b style='color:{colour}'>{r['signal']}</b></td>"
-                        f"<td {td}>{fmt(r['entry'])}</td><td {td}>{fmt(r['stop'])}</td>"
-                        f"<td {td}>{fmt(r['target'])}</td></tr>")
-        html.append("</table>")
+            icon = "🟢" if r["signal"] == "LONG" else "🔴"
+            lines.append(f"| {r['name']} | {icon} **{r['signal']}** | {fmt(r['entry'])} | "
+                         f"{fmt(r['stop'])} | {fmt(r['target'])} |")
+        lines += ["", "Entry is the last close; in practice you enter at the next open and keep "
+                  "the stop 1.5 ATR and target 3 ATR from your actual fill.", ""]
     else:
-        html.append("<p style='font-family:Arial'>No trend + pullback setups today. Patience is a position.</p>")
+        lines += ["## No setups today", "", "No trend + pullback setups. Patience is a position.", ""]
 
-    html.append("<h3 style='font-family:Arial'>Full watchlist</h3>")
-    html.append(f"<table style='border-collapse:collapse;font-family:Arial;font-size:14px'><tr>"
-                f"<th {thl}>Market</th><th {thl}>Trend</th><th {th}>Close</th>"
-                f"<th {th}>20 EMA</th><th {th}>50 EMA</th><th {th}>200 EMA</th>"
-                f"<th {th}>ATR</th><th {th}>Dist. 20 EMA (ATR)</th></tr>")
+    lines += ["## Full watchlist", "",
+              "| Market | Candle | Trend | Close | 20 EMA | 50 EMA | 200 EMA | ATR | Dist. 20 EMA (ATR) |",
+              "|---|---|---|---:|---:|---:|---:|---:|---:|"]
     for r in results:
-        html.append(f"<tr><td {tdl}>{r['name']}</td><td {tdl}>{r['trend']}</td>"
-                    f"<td {td}>{fmt(r['close'])}</td><td {td}>{fmt(r['ema20'])}</td>"
-                    f"<td {td}>{fmt(r['ema50'])}</td><td {td}>{fmt(r['ema200'])}</td>"
-                    f"<td {td}>{fmt(r['atr'])}</td><td {td}>{r['dist20_atr']:+.1f}</td></tr>")
-    html.append("</table>")
-
+        lines.append(f"| {r['name']} | {r['date']} | {r['trend']} | {fmt(r['close'])} | {fmt(r['ema20'])} | "
+                     f"{fmt(r['ema50'])} | {fmt(r['ema200'])} | {fmt(r['atr'])} | {r['dist20_atr']:+.1f} |")
     if errors:
-        html.append("<p style='font-family:Arial;color:#b45309'>Could not fetch: " + ", ".join(errors) + "</p>")
-
-    html.append("<p style='font-family:Arial;font-size:12px;color:#6b7280'>Based on the last completed daily candle. "
-                "Levels are reference points, not financial advice. Check the chart and size positions to your risk "
-                "(e.g. 1% of account per trade).</p>")
-    return subject, "\n".join(html)
+        lines += ["", "⚠️ Could not fetch: " + ", ".join(errors)]
+    lines += ["", "_Based on the last completed daily candle. Reference levels, not financial advice. "
+              "Risk about 1% of your account per trade._"]
+    return title, "\n".join(lines)
 
 
-def send_email(subject: str, html: str):
-    sender = os.environ["EMAIL_ADDRESS"]
-    password = os.environ["EMAIL_APP_PASSWORD"]
-    recipient = os.environ.get("EMAIL_TO") or sender
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"], msg["From"], msg["To"] = subject, sender, recipient
-    msg.attach(MIMEText(html, "html"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as server:
-        server.login(sender, password)
-        server.sendmail(sender, recipient.split(","), msg.as_string())
+def publish(title: str, body: str):
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
+    if owner:
+        body += f"\n\ncc @{owner}"
+    if os.environ.get("DRY_RUN") == "1" or not os.environ.get("GITHUB_TOKEN"):
+        print(f"\n# {title}\n\n{body}")
+        return
+    repo = os.environ["GITHUB_REPOSITORY"]
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/issues",
+        data=json.dumps({"title": title, "body": body}).encode(),
+        headers={"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                 "Accept": "application/vnd.github+json",
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        print("Posted:", json.load(resp)["html_url"])
